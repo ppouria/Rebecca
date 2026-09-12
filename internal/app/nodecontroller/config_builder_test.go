@@ -156,6 +156,10 @@ func TestApplyRuntimeAPIEnablesOnlineUserStats(t *testing.T) {
 		encoded, _ := json.Marshal(level0)
 		t.Fatalf("runtime user stats policy is incomplete: %s", encoded)
 	}
+	system := mapValue(policy["system"])
+	if system["statsInboundUplink"] != true || system["statsInboundDownlink"] != true {
+		t.Fatalf("runtime inbound stats policy is incomplete: %#v", system)
+	}
 }
 
 func TestRemoteAccessProtocolsRequireFullUserSync(t *testing.T) {

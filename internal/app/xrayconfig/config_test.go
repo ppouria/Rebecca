@@ -1821,11 +1821,11 @@ func TestMergePolicyPreservesIndependentInboundStatsToggles(t *testing.T) {
 	runtime := map[string]any{}
 	mergePolicy(runtime)
 	system := mapValue(mapValue(runtime["policy"])["system"])
-	if _, exists := system["statsInboundUplink"]; exists {
-		t.Fatalf("missing inbound toggle should retain Xray's false default: %#v", system)
+	if system["statsInboundUplink"] != true {
+		t.Fatalf("missing inbound uplink toggle should enable inbound statistics: %#v", system)
 	}
-	if _, exists := system["statsInboundDownlink"]; exists {
-		t.Fatalf("missing inbound toggle should retain Xray's false default: %#v", system)
+	if system["statsInboundDownlink"] != true {
+		t.Fatalf("missing inbound downlink toggle should enable inbound statistics: %#v", system)
 	}
 }
 
