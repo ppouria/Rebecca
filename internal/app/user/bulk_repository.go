@@ -107,6 +107,30 @@ func (r Repository) bulkUsersActionMutation(ctx context.Context, requester admin
 			return BulkUsersActionResult{}, err
 		}
 		result = BulkUsersActionResult{Detail: "Expiration dates shortened", Count: count}
+	case AdvancedUserActionMultiplyExpire:
+		count, err := r.multiplyBulkExpireTx(ctx, tx, targetAdmin, payload, *payload.Factor)
+		if err != nil {
+			return BulkUsersActionResult{}, err
+		}
+		result = BulkUsersActionResult{Detail: "Expiration dates multiplied", Count: count}
+	case AdvancedUserActionDivideExpire:
+		count, err := r.multiplyBulkExpireTx(ctx, tx, targetAdmin, payload, 1.0 / *payload.Factor)
+		if err != nil {
+			return BulkUsersActionResult{}, err
+		}
+		result = BulkUsersActionResult{Detail: "Expiration dates divided", Count: count}
+	case AdvancedUserActionMultiplyTraffic:
+		count, err := r.multiplyBulkLimitTx(ctx, tx, targetAdmin, payload, *payload.Factor)
+		if err != nil {
+			return BulkUsersActionResult{}, err
+		}
+		result = BulkUsersActionResult{Detail: "Data limits multiplied for users", Count: count}
+	case AdvancedUserActionDivideTraffic:
+		count, err := r.multiplyBulkLimitTx(ctx, tx, targetAdmin, payload, 1.0 / *payload.Factor)
+		if err != nil {
+			return BulkUsersActionResult{}, err
+		}
+		result = BulkUsersActionResult{Detail: "Data limits divided for users", Count: count}
 	case AdvancedUserActionIncreaseTraffic:
 		delta := int64(math.Round(*payload.Gigabytes * 1073741824))
 		if delta < 1 {
@@ -177,10 +201,10 @@ func (r Repository) bulkUsersActionMutation(ctx context.Context, requester admin
 func (r Repository) bulkAffectedUserIDsTx(ctx context.Context, tx *sql.Tx, targetAdmin *adminapp.Admin, payload BulkUsersActionRequest) ([]int64, error) {
 	filter := r.bulkFilter(targetAdmin, payload)
 	switch payload.Action {
-	case AdvancedUserActionExtendExpire, AdvancedUserActionReduceExpire:
+	case AdvancedUserActionExtendExpire, AdvancedUserActionReduceExpire, AdvancedUserActionMultiplyExpire, AdvancedUserActionDivideExpire:
 		scope := bulkStatusScope(payload.Scope, []UserStatus{UserStatusActive})
 		filter.addStatuses("status", scope)
-	case AdvancedUserActionIncreaseTraffic, AdvancedUserActionDecreaseTraffic:
+	case AdvancedUserActionIncreaseTraffic, AdvancedUserActionDecreaseTraffic, AdvancedUserActionMultiplyTraffic, AdvancedUserActionDivideTraffic:
 		scope := bulkStatusScope(payload.Scope, []UserStatus{UserStatusActive})
 		filter.addStatuses("status", scope)
 		filter.where = append(filter.where, "data_limit IS NOT NULL", "data_limit > 0")
@@ -752,6 +776,38 @@ func (r Repository) bulkCreatedTrafficIncrementsTx(ctx context.Context, tx *sql.
 	return result, rows.Err()
 }
 
+func (r Repository) bulkCreatedTrafficMultiplierIncrementsTx(ctx context.Context, tx *sql.Tx, targetAdmin *adminapp.Admin, payload BulkUsersActionRequest, factor float64) ([]createdTrafficIncrement, error) {
+	if factor <= 1 {
+		return nil, nil
+	}
+	filter := r.bulkFilter(targetAdmin, payload)
+	filter.where = append(filter.where, "data_limit IS NOT NULL", "data_limit > 0")
+	filter.addStatuses("status", bulkStatusScope(payload.Scope, []UserStatus{UserStatusActive}))
+	whereSQL, args := filter.sql()
+
+	query := "SELECT admin_id, service_id, SUM(CAST(ROUND(data_limit * ?) AS INTEGER) - data_limit) FROM users WHERE " + whereSQL + " AND admin_id IS NOT NULL GROUP BY admin_id, service_id"
+	queryArgs := append([]any{factor}, args...)
+	
+	rows, err := tx.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []createdTrafficIncrement{}
+	for rows.Next() {
+		var adminID int64
+		var serviceID sql.NullInt64
+		var amount sql.NullInt64
+		if err := rows.Scan(&adminID, &serviceID, &amount); err != nil {
+			return nil, err
+		}
+		if amount.Valid && amount.Int64 > 0 {
+			result = append(result, createdTrafficIncrement{adminID: adminID, serviceID: int64Ptr(serviceID), amount: amount.Int64})
+		}
+	}
+	return result, rows.Err()
+}
+
 func (r Repository) ensureBulkCreatedTrafficLimitsTx(ctx context.Context, tx *sql.Tx, increments []createdTrafficIncrement) error {
 	for _, inc := range increments {
 		if inc.amount <= 0 || inc.adminID <= 0 {
@@ -813,4 +869,118 @@ func rowsAffected(res sql.Result) int64 {
 		return 0
 	}
 	return count
+}
+
+func (r Repository) multiplyBulkExpireTx(ctx context.Context, tx *sql.Tx, targetAdmin *adminapp.Admin, payload BulkUsersActionRequest, factor float64) (int64, error) {
+	scope := bulkStatusScope(payload.Scope, []UserStatus{UserStatusActive})
+	total := int64(0)
+	expireScope := make([]UserStatus, 0, len(scope))
+	includeOnHold := false
+	for _, status := range scope {
+		if status == UserStatusOnHold {
+			includeOnHold = true
+			continue
+		}
+		expireScope = append(expireScope, status)
+	}
+	now := time.Now().UTC()
+	nowUnix := now.Unix()
+
+	if len(expireScope) > 0 {
+		filter := r.bulkFilter(targetAdmin, payload)
+		filter.addStatuses("status", expireScope)
+		filter.where = append(filter.where, "expire IS NOT NULL", "expire > ?")
+		filter.args = append(filter.args, nowUnix)
+		whereSQL, args := filter.sql()
+
+		newExpire := "CAST(ROUND(? + (expire - ?) * ?) AS INTEGER)"
+		
+		statusCase := "CASE WHEN status = ? THEN ? WHEN status = ? THEN ? WHEN " + newExpire + " <= ? THEN ? WHEN status = ? THEN ? ELSE status END"
+		statusArgs := []any{
+			string(UserStatusDisabled), string(UserStatusDisabled),
+			string(UserStatusLimited), string(UserStatusLimited),
+			nowUnix, nowUnix, factor, nowUnix, string(UserStatusExpired),
+			string(UserStatusExpired), string(UserStatusActive),
+		}
+
+		query := "UPDATE users SET expire = " + newExpire + ", status = " + statusCase + ", last_status_change = CASE WHEN status != " + statusCase + " THEN ? ELSE last_status_change END WHERE " + whereSQL
+		
+		allArgs := []any{nowUnix, nowUnix, factor}
+		allArgs = append(allArgs, statusArgs...)
+		allArgs = append(allArgs, statusArgs...)
+		allArgs = append(allArgs, dbTime(now))
+		allArgs = append(allArgs, args...)
+
+		res, err := tx.ExecContext(ctx, query, allArgs...)
+		if err != nil {
+			return 0, err
+		}
+		total += rowsAffected(res)
+	}
+	if includeOnHold {
+		filter := r.bulkFilter(targetAdmin, payload)
+		filter.where = append(filter.where, "status = ?", "on_hold_expire_duration IS NOT NULL", "on_hold_expire_duration > 0")
+		filter.args = append(filter.args, string(UserStatusOnHold))
+		whereSQL, args := filter.sql()
+
+		newDuration := "CAST(ROUND(on_hold_expire_duration * ?) AS INTEGER)"
+		query := "UPDATE users SET on_hold_expire_duration = CASE WHEN " + newDuration + " < 0 THEN 0 ELSE " + newDuration + " END WHERE " + whereSQL
+		
+		allArgs := []any{factor, factor}
+		allArgs = append(allArgs, args...)
+
+		res, err := tx.ExecContext(ctx, query, allArgs...)
+		if err != nil {
+			return 0, err
+		}
+		total += rowsAffected(res)
+	}
+	return total, nil
+}
+
+func (r Repository) multiplyBulkLimitTx(ctx context.Context, tx *sql.Tx, targetAdmin *adminapp.Admin, payload BulkUsersActionRequest, factor float64) (int64, error) {
+	scope := bulkStatusScope(payload.Scope, []UserStatus{UserStatusActive})
+	filter := r.bulkFilter(targetAdmin, payload)
+	filter.where = append(filter.where, "data_limit IS NOT NULL", "data_limit > 0")
+	filter.addStatuses("status", scope)
+
+	if factor > 1 {
+		increments, err := r.bulkCreatedTrafficMultiplierIncrementsTx(ctx, tx, targetAdmin, payload, factor)
+		if err != nil {
+			return 0, err
+		}
+		if err := r.ensureBulkCreatedTrafficLimitsTx(ctx, tx, increments); err != nil {
+			return 0, err
+		}
+		if err := r.recordBulkCreatedTrafficTx(ctx, tx, increments, "bulk_limit_multiply", time.Now().UTC()); err != nil {
+			return 0, err
+		}
+	}
+
+	now := time.Now().UTC()
+	whereSQL, args := filter.sql()
+
+	newLimit := "CAST(ROUND(data_limit * ?) AS INTEGER)"
+	statusCase := "CASE WHEN status = ? THEN ? WHEN status = ? THEN ? WHEN status = ? THEN ? WHEN " + newLimit + " > 0 AND COALESCE(used_traffic, 0) >= " + newLimit + " THEN ? ELSE ? END"
+	statusArgs := []any{
+		string(UserStatusDisabled), string(UserStatusDisabled),
+		string(UserStatusOnHold), string(UserStatusOnHold),
+		string(UserStatusExpired), string(UserStatusExpired),
+		factor, factor,
+		string(UserStatusLimited), string(UserStatusActive),
+	}
+
+	query := "UPDATE users SET data_limit = CASE WHEN " + newLimit + " < 0 THEN 0 ELSE " + newLimit + " END, status = " + statusCase + ", last_status_change = CASE WHEN status != " + statusCase + " THEN ? ELSE last_status_change END WHERE " + whereSQL
+
+	allArgs := []any{factor, factor}
+	allArgs = append(allArgs, statusArgs...)
+	allArgs = append(allArgs, statusArgs...)
+	allArgs = append(allArgs, dbTime(now))
+	allArgs = append(allArgs, args...)
+
+	res, err := tx.ExecContext(ctx, query, allArgs...)
+	if err != nil {
+		return 0, err
+	}
+	return rowsAffected(res), nil
 }

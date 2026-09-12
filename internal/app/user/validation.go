@@ -112,6 +112,10 @@ func ValidateBulkUsersAction(payload *BulkUsersActionRequest) error {
 		AdvancedUserActionDisableUsers:    {},
 		AdvancedUserActionChangeService:   {},
 		AdvancedUserActionDeleteUsers:     {},
+		AdvancedUserActionMultiplyExpire:  {},
+		AdvancedUserActionDivideExpire:    {},
+		AdvancedUserActionMultiplyTraffic: {},
+		AdvancedUserActionDivideTraffic:   {},
 	}
 	if _, ok := allowedActions[payload.Action]; !ok {
 		return ValidationError{Detail: "unsupported bulk action"}
@@ -124,6 +128,17 @@ func ValidateBulkUsersAction(payload *BulkUsersActionRequest) error {
 	if _, ok := needsDays[payload.Action]; ok {
 		if payload.Days == nil || *payload.Days <= 0 {
 			return ValidationError{Detail: "days must be a positive integer"}
+		}
+	}
+	needsFactor := map[AdvancedUserAction]struct{}{
+		AdvancedUserActionMultiplyExpire:  {},
+		AdvancedUserActionDivideExpire:    {},
+		AdvancedUserActionMultiplyTraffic: {},
+		AdvancedUserActionDivideTraffic:   {},
+	}
+	if _, ok := needsFactor[payload.Action]; ok {
+		if payload.Factor == nil || *payload.Factor <= 0 {
+			return ValidationError{Detail: "factor must be a positive number"}
 		}
 	}
 	if payload.Action == AdvancedUserActionIncreaseTraffic || payload.Action == AdvancedUserActionDecreaseTraffic {

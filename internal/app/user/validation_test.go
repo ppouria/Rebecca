@@ -215,6 +215,10 @@ func TestBulkUsersActionValidation(t *testing.T) {
 		{name: "status age needs scope", payload: BulkUsersActionRequest{Action: AdvancedUserActionDeleteUsers, StatusAgeDays: &conditionDays}, wantErr: "requires at least one status"},
 		{name: "valid conditional delete", payload: BulkUsersActionRequest{Action: AdvancedUserActionDeleteUsers, Scope: []UserStatus{UserStatusExpired}, StatusAgeDays: &conditionDays}},
 		{name: "valid traffic", payload: BulkUsersActionRequest{Action: AdvancedUserActionIncreaseTraffic, Gigabytes: &gb}},
+		{name: "multiply needs factor", payload: BulkUsersActionRequest{Action: AdvancedUserActionMultiplyExpire}, wantErr: "factor"},
+		{name: "valid multiply", payload: BulkUsersActionRequest{Action: AdvancedUserActionMultiplyExpire, Factor: &gb}},
+		{name: "multiply traffic needs factor", payload: BulkUsersActionRequest{Action: AdvancedUserActionMultiplyTraffic}, wantErr: "factor"},
+		{name: "valid multiply traffic", payload: BulkUsersActionRequest{Action: AdvancedUserActionMultiplyTraffic, Factor: &gb}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

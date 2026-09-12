@@ -50,6 +50,10 @@ const (
 	AdvancedUserActionDisableUsers    AdvancedUserAction = "disable_users"
 	AdvancedUserActionChangeService   AdvancedUserAction = "change_service"
 	AdvancedUserActionDeleteUsers     AdvancedUserAction = "delete_users"
+	AdvancedUserActionMultiplyExpire  AdvancedUserAction = "multiply_expire"
+	AdvancedUserActionDivideExpire    AdvancedUserAction = "divide_expire"
+	AdvancedUserActionMultiplyTraffic AdvancedUserAction = "multiply_traffic"
+	AdvancedUserActionDivideTraffic   AdvancedUserAction = "divide_traffic"
 )
 
 type ProxyPayload map[string]map[string]any
@@ -115,6 +119,7 @@ type UserModify struct {
 type BulkUsersActionRequest struct {
 	Action            AdvancedUserAction `json:"action"`
 	Days              *int64             `json:"days,omitempty"`
+	Factor            *float64           `json:"factor,omitempty"`
 	Gigabytes         *float64           `json:"gigabytes,omitempty"`
 	Statuses          []UserStatus       `json:"statuses,omitempty"`
 	Scope             []UserStatus       `json:"scope,omitempty"`

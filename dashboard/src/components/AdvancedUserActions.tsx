@@ -91,7 +91,9 @@ const AdvancedUserActions = ({
 	const userManagementLocked = isUserManagementLocked(userData);
 	const { isOpen, onOpen, onClose } = useDisclosure();
 	const [expireDays, setExpireDays] = useState("");
+	const [expireFactor, setExpireFactor] = useState("");
 	const [trafficGb, setTrafficGb] = useState("");
+	const [trafficFactor, setTrafficFactor] = useState("");
 	const [cleanupDays, setCleanupDays] = useState("");
 	const [selectedStatuses, setSelectedStatuses] = useState<
 		AdvancedUserActionStatus[]
@@ -101,6 +103,10 @@ const AdvancedUserActions = ({
 	>(["active"]);
 	const [isExtending, setIsExtending] = useState(false);
 	const [isReducing, setIsReducing] = useState(false);
+	const [isMultiplyingExpire, setIsMultiplyingExpire] = useState(false);
+	const [isDividingExpire, setIsDividingExpire] = useState(false);
+	const [isMultiplyingTraffic, setIsMultiplyingTraffic] = useState(false);
+	const [isDividingTraffic, setIsDividingTraffic] = useState(false);
 	const [isIncreasingTraffic, setIsIncreasingTraffic] = useState(false);
 	const [isDecreasingTraffic, setIsDecreasingTraffic] = useState(false);
 	const [isCleaning, setIsCleaning] = useState(false);
@@ -285,6 +291,54 @@ const AdvancedUserActions = ({
 		}
 	};
 
+	const handleExpireFactorAction = async (action: AdvancedUserActionType) => {
+		const factor = Number(expireFactor);
+		if (!Number.isFinite(factor) || factor <= 0) {
+			showToast(
+				t("filters.advancedActions.error.invalidFactor"),
+				"warning",
+			);
+			return;
+		}
+		if (!selectedScopeStatuses.length) {
+			showToast(
+				t("filters.advancedActions.error.noScope"),
+				"warning",
+			);
+			return;
+		}
+		const targeting = buildTargetingPayload();
+		if (!targeting) return;
+		
+		const setLoading = action === "multiply_expire" ? setIsMultiplyingExpire : setIsDividingExpire;
+		setLoading(true);
+		
+		try {
+			const targetAdminUsername = resolveTargetAdminUsername();
+			const payload: AdvancedUserActionPayload = {
+				action,
+				factor,
+				scope: selectedScopeStatuses,
+				admin_username: targetAdminUsername,
+				...buildServiceScopePayload(),
+				...targeting,
+			} as AdvancedUserActionPayload;
+			
+			const result = await performBulkUserAction(payload);
+			showToast(
+				t("filters.advancedActions.success.expire", {
+					count: result.count ?? 0,
+				}),
+				"success",
+			);
+			setExpireFactor("");
+		} catch (error) {
+			handleError(resolveErrorMessage(error));
+		} finally {
+			setLoading(false);
+		}
+	};
+
 	const handleTrafficAction = async (action: AdvancedUserActionType) => {
 		const value = Number(trafficGb);
 		if (!Number.isFinite(value) || value <= 0) {
@@ -327,6 +381,55 @@ const AdvancedUserActions = ({
 				"success",
 			);
 			setTrafficGb("");
+		} catch (error) {
+			handleError(resolveErrorMessage(error));
+		} finally {
+			setLoading(false);
+		}
+	};
+
+	const handleTrafficFactorAction = async (action: AdvancedUserActionType) => {
+		const factor = Number(trafficFactor);
+		if (!Number.isFinite(factor) || factor <= 0) {
+			showToast(
+				t("filters.advancedActions.error.invalidFactor"),
+				"warning",
+			);
+			return;
+		}
+		if (!selectedScopeStatuses.length) {
+			showToast(
+				t("filters.advancedActions.error.noScope"),
+				"warning",
+			);
+			return;
+		}
+		const targeting = buildTargetingPayload();
+		if (!targeting) return;
+		
+		const setLoading = action === "multiply_traffic" ? setIsMultiplyingTraffic : setIsDividingTraffic;
+		setLoading(true);
+		
+		try {
+			const targetAdminUsername = resolveTargetAdminUsername();
+			const payload: AdvancedUserActionPayload = {
+				action,
+				factor,
+				scope: selectedScopeStatuses,
+				admin_username: targetAdminUsername,
+				...buildServiceScopePayload(),
+				...targeting,
+			} as AdvancedUserActionPayload;
+			
+			const result = await performBulkUserAction(payload);
+			showToast(
+				t("filters.advancedActions.success.traffic", {
+					count: result.count ?? 0,
+					value: factor,
+				}),
+				"success",
+			);
+			setTrafficFactor("");
 		} catch (error) {
 			handleError(resolveErrorMessage(error));
 		} finally {
@@ -700,6 +803,41 @@ const AdvancedUserActions = ({
 								{t("filters.advancedActions.expireSection.removeButton")}
 							</Button>
 						</HStack>
+						
+						<FormControl mt={4}>
+							<FormLabel>
+								{t("filters.advancedActions.expireSection.factorLabel")}
+							</FormLabel>
+							<NumericInput
+								value={expireFactor}
+								onChange={(value) => setExpireFactor(value)}
+								min={0.01}
+								step={0.1}
+								w="full"
+							/>
+						</FormControl>
+						<HStack spacing={2} flexWrap="wrap" mt={2}>
+							<Button
+								colorScheme="primary"
+								isLoading={isMultiplyingExpire}
+								flex="1"
+								minW="150px"
+								onClick={() => handleExpireFactorAction("multiply_expire")}
+							>
+								{t("filters.advancedActions.expireSection.multiplyButton")}
+							</Button>
+							<Button
+								colorScheme="gray"
+								variant="outline"
+								isLoading={isDividingExpire}
+								flex="1"
+								minW="150px"
+								onClick={() => handleExpireFactorAction("divide_expire")}
+							>
+								{t("filters.advancedActions.expireSection.divideButton")}
+							</Button>
+						</HStack>
+
 					</Stack>
 				</Box>
 
@@ -744,6 +882,41 @@ const AdvancedUserActions = ({
 								{t("filters.advancedActions.trafficSection.removeButton")}
 							</Button>
 						</HStack>
+
+						<FormControl mt={4}>
+							<FormLabel>
+								{t("filters.advancedActions.trafficSection.factorLabel")}
+							</FormLabel>
+							<NumericInput
+								value={trafficFactor}
+								onChange={(value) => setTrafficFactor(value)}
+								min={0.01}
+								step={0.1}
+								w="full"
+							/>
+						</FormControl>
+						<HStack spacing={2} flexWrap="wrap" mt={2}>
+							<Button
+								colorScheme="primary"
+								isLoading={isMultiplyingTraffic}
+								flex="1"
+								minW="150px"
+								onClick={() => handleTrafficFactorAction("multiply_traffic")}
+							>
+								{t("filters.advancedActions.trafficSection.multiplyButton")}
+							</Button>
+							<Button
+								colorScheme="gray"
+								variant="outline"
+								isLoading={isDividingTraffic}
+								flex="1"
+								minW="150px"
+								onClick={() => handleTrafficFactorAction("divide_traffic")}
+							>
+								{t("filters.advancedActions.trafficSection.divideButton")}
+							</Button>
+						</HStack>
+
 					</Stack>
 				</Box>
 
