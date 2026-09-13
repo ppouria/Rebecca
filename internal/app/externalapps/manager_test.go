@@ -808,3 +808,55 @@ func TestLatestMirzaBotReleaseArchive(t *testing.T) {
 	}
 	t.Logf("validated MirzaBot %s at %s", source.Version, source.SHA)
 }
+
+func TestPatchMirzaMiniAppUsesMountedPaths(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "app", "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := filepath.Join(root, "app", "index.php")
+	if err := os.WriteFile(indexPath, []byte("<head></head>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assetPath := filepath.Join(root, "app", "assets", "index.js")
+	asset := `const api=window.location.origin+"/api";if(window.location.pathname!=="/app/")window.location.href="/app/";`
+	if err := os.WriteFile(assetPath, []byte(asset), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchMirzaMiniApp(root, "bot0123456789ab"); err != nil {
+		t.Fatal(err)
+	}
+	index, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(index), `__MIRZA_API_ORIGIN=window.location.origin+"/bot0123456789ab"`) || !strings.Contains(string(index), `__MIRZA_APP_PATH="/bot0123456789ab/app/"`) {
+		t.Fatalf("mounted bootstrap missing: %s", index)
+	}
+	updated, err := os.ReadFile(assetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`window.__MIRZA_API_ORIGIN||window.location.origin+"/api"`,
+		`window.location.pathname!==window.__MIRZA_APP_PATH`,
+		`window.location.href=window.__MIRZA_APP_PATH`,
+	} {
+		if !strings.Contains(string(updated), expected) {
+			t.Fatalf("asset missing %q: %s", expected, updated)
+		}
+	}
+}
+
+func TestMatchMirzaLegacyPathRequiresSingleMountedApp(t *testing.T) {
+	manager := &Manager{apps: map[string]Record{
+		"one": {ID: "one", Template: "mirzabot", Domain: "bot.example.com", Path: "bot0123456789ab"},
+	}}
+	if record, relative, ok := manager.MatchMirzaLegacyPath("bot.example.com", "/api/keyboard.php"); !ok || record.ID != "one" || relative != "api/keyboard.php" {
+		t.Fatalf("legacy match=%+v %q %v", record, relative, ok)
+	}
+	manager.apps["two"] = Record{ID: "two", Template: "mirzabot", Domain: "bot.example.com", Path: "botabcdef012345"}
+	if _, _, ok := manager.MatchMirzaLegacyPath("bot.example.com", "/api/keyboard.php"); ok {
+		t.Fatal("ambiguous legacy match was accepted")
+	}
+}

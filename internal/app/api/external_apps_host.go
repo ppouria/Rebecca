@@ -39,6 +39,9 @@ func (h *externalAppAwareHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 	record, relativePath, ok := h.apps.Match(r.Host, r.URL.Path)
 	if !ok {
+		record, relativePath, ok = h.apps.MatchMirzaLegacyPath(r.Host, r.URL.Path)
+	}
+	if !ok {
 		if !h.apps.HasHost(r.Host) {
 			h.next.ServeHTTP(w, r)
 			return

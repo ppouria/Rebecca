@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -286,6 +287,9 @@ func (m *Manager) reload() {
 			record.Domain = domain
 			record.Path = mountPath
 			record.storageBase = base
+			if record.Template == "mirzabot" {
+				_ = patchMirzaMiniApp(record.Root, mountPath)
+			}
 			loaded[id] = record
 			mounts[mountKey] = true
 		}
@@ -366,6 +370,36 @@ func (m *Manager) Match(host, requestPath string) (Record, string, bool) {
 		}
 	}
 	return matched, matchedPath, best >= 0
+}
+
+// MatchMirzaLegacyPath keeps older Mini App bundles working when they request
+// /app or /api from the domain root instead of including the external-app mount.
+// A domain with multiple MirzaBot apps is intentionally left ambiguous.
+func (m *Manager) MatchMirzaLegacyPath(host, requestPath string) (Record, string, bool) {
+	if m.sqliteDisabled() {
+		return Record{}, "", false
+	}
+	cleanPath := strings.TrimPrefix(path.Clean("/"+requestPath), "/")
+	if cleanPath != "app" && !strings.HasPrefix(cleanPath, "app/") && cleanPath != "api" && !strings.HasPrefix(cleanPath, "api/") {
+		return Record{}, "", false
+	}
+	host = CanonicalHost(host)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var matched Record
+	for _, record := range m.apps {
+		if record.Template != "mirzabot" || record.Domain != host || strings.TrimSpace(record.Path) == "" {
+			continue
+		}
+		if matched.ID != "" {
+			return Record{}, "", false
+		}
+		matched = record
+	}
+	if matched.ID == "" {
+		return Record{}, "", false
+	}
+	return matched, cleanPath, true
 }
 
 func (m *Manager) mountExists(domain, mountPath string) bool {
@@ -953,6 +987,9 @@ func (m *Manager) installMirzaBot(ctx context.Context, request InstallRequest) (
 	if err := removeMirzaBotInstaller(record.Root); err != nil {
 		return PublicRecord{}, err
 	}
+	if err := patchMirzaMiniApp(record.Root, record.Path); err != nil {
+		return PublicRecord{}, err
+	}
 	uid, gid, err := unixUserIDs(ctx, record.SystemUser)
 	if err != nil {
 		return PublicRecord{}, err
@@ -1184,6 +1221,84 @@ func (m *Manager) updateSettings(identifier, indexFile string, fallbackToIndex b
 	return publicExternalAppRecord(record), nil
 }
 
+func patchMirzaMiniApp(root, mountPath string) error {
+	if !externalAppPathPattern.MatchString(mountPath) {
+		return fmt.Errorf("invalid MirzaBot mount path %q", mountPath)
+	}
+	appRoot := filepath.Join(root, "app")
+	if _, err := os.Stat(appRoot); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("prepare MirzaBot Mini App: %w", err)
+	}
+	indexPath := filepath.Join(appRoot, "index.php")
+	index, err := os.ReadFile(indexPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("prepare MirzaBot Mini App: %w", err)
+	}
+	apiOrigin := "/" + mountPath
+	appPath := apiOrigin + "/app/"
+	bootstrap := []byte(`<script>window.__MIRZA_API_ORIGIN=window.location.origin+"` + apiOrigin + `";window.__MIRZA_APP_PATH="` + appPath + `";</script>`)
+	if !bytes.Contains(index, []byte("__MIRZA_API_ORIGIN")) {
+		marker := []byte("</head>")
+		at := bytes.Index(index, marker)
+		if at < 0 {
+			return errors.New("prepare MirzaBot Mini App: app/index.php has no head element")
+		}
+		updated := make([]byte, 0, len(index)+len(bootstrap))
+		updated = append(updated, index[:at]...)
+		updated = append(updated, bootstrap...)
+		updated = append(updated, index[at:]...)
+		if err := os.WriteFile(indexPath, updated, 0o644); err != nil {
+			return err
+		}
+	}
+
+	assetsRoot := filepath.Join(appRoot, "assets")
+	if _, err := os.Stat(assetsRoot); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("prepare MirzaBot Mini App: %w", err)
+	}
+	return filepath.WalkDir(assetsRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 || !strings.EqualFold(filepath.Ext(entry.Name()), ".js") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		const patchMarker = "/* rebecca-mirza-mounted */"
+		if strings.Contains(string(content), patchMarker) {
+			return nil
+		}
+		updated := []byte(strings.NewReplacer(
+			`window.location.origin+"/api/`, `window.__MIRZA_API_ORIGIN+"/`,
+			`window.location.origin+"/api"`, `window.__MIRZA_API_ORIGIN||window.location.origin+"/api"`,
+			`window.location.pathname!=="/app/"`, `window.location.pathname!==window.__MIRZA_APP_PATH`,
+			`window.location.href="/app/"`, `window.location.href=window.__MIRZA_APP_PATH`,
+		).Replace(string(content)))
+		if bytes.Equal(content, updated) {
+			return nil
+		}
+		updated = append([]byte(patchMarker+"\n"), updated...)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, updated, info.Mode().Perm())
+	})
+}
+
 func (m *Manager) updateMirzaBot(ctx context.Context, identifier string) (PublicRecord, error) {
 	if !m.operationMu.TryLock() {
 		return PublicRecord{}, errExternalAppBusy
@@ -1232,6 +1347,9 @@ func (m *Manager) updateMirzaBot(ctx context.Context, identifier string) (Public
 		return PublicRecord{}, err
 	}
 	if err := removeMirzaBotInstaller(nextRoot); err != nil {
+		return PublicRecord{}, err
+	}
+	if err := patchMirzaMiniApp(nextRoot, record.Path); err != nil {
 		return PublicRecord{}, err
 	}
 	if err := prepareOwnedExternalAppTree(nextRoot, uid, gid); err != nil {

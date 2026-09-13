@@ -2,6 +2,7 @@ package backup
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"compress/gzip"
@@ -1069,16 +1070,32 @@ func safeExtract(archivePath string, destination string) error {
 		return err
 	}
 	defer file.Close()
-	gzipReader, err := gzip.NewReader(file)
-	if err != nil {
-		return err
-	}
-	defer gzipReader.Close()
-	tarReader := tar.NewReader(gzipReader)
 	base, err := filepath.Abs(destination)
 	if err != nil {
 		return err
 	}
+	var signature [4]byte
+	if _, err := io.ReadFull(file, signature[:]); err != nil {
+		return Error{Message: "Backup archive is invalid or empty"}
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if signature[0] == 0x1f && signature[1] == 0x8b {
+		gzipReader, err := gzip.NewReader(file)
+		if err != nil {
+			return Error{Message: "Backup archive is not a valid gzip file"}
+		}
+		defer gzipReader.Close()
+		return safeExtractTar(tar.NewReader(gzipReader), base)
+	}
+	if signature[0] == 'P' && signature[1] == 'K' && (signature[2] == 0x03 || signature[2] == 0x05 || signature[2] == 0x07) {
+		return safeExtractZip(archivePath, base)
+	}
+	return Error{Message: "Backup archive must be a tar.gz or ZIP file"}
+}
+
+func safeExtractTar(tarReader *tar.Reader, base string) error {
 	entries := 0
 	var extracted int64
 	for {
@@ -1097,7 +1114,10 @@ func safeExtract(archivePath string, destination string) error {
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(base, entryName)
+		target, err := safeArchiveTarget(base, entryName)
+		if err != nil {
+			return err
+		}
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, fs.FileMode(header.Mode)&0o777); err != nil {
@@ -1127,6 +1147,74 @@ func safeExtract(archivePath string, destination string) error {
 			return Error{Message: "Backup archive contains unsupported linked or device entries"}
 		}
 	}
+}
+
+func safeExtractZip(archivePath string, base string) error {
+	reader, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return Error{Message: "Backup archive is not a valid ZIP file"}
+	}
+	defer reader.Close()
+	if len(reader.File) > maxBackupArchiveEntries {
+		return Error{Message: "Backup archive contains too many entries"}
+	}
+	var extracted int64
+	for _, entry := range reader.File {
+		entryName, err := safeArchiveName(entry.Name)
+		if err != nil {
+			return err
+		}
+		target, err := safeArchiveTarget(base, entryName)
+		if err != nil {
+			return err
+		}
+		mode := entry.FileInfo().Mode()
+		if mode&os.ModeSymlink != 0 || mode&os.ModeNamedPipe != 0 || mode&os.ModeDevice != 0 || mode&os.ModeSocket != 0 {
+			return Error{Message: "Backup archive contains unsupported linked or device entries"}
+		}
+		if entry.FileInfo().IsDir() || strings.HasSuffix(entry.Name, "/") {
+			if err := os.MkdirAll(target, mode.Perm()&0o777); err != nil {
+				return err
+			}
+			continue
+		}
+		if entry.UncompressedSize64 > uint64(maxBackupExtractBytes-extracted) {
+			return Error{Message: "Backup archive is too large to extract"}
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		input, err := entry.Open()
+		if err != nil {
+			return err
+		}
+		fileMode := mode.Perm() & 0o666
+		if fileMode == 0 {
+			fileMode = 0o600
+		}
+		output, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fileMode)
+		if err != nil {
+			_ = input.Close()
+			return err
+		}
+		written, copyErr := io.Copy(output, io.LimitReader(input, maxBackupExtractBytes-extracted+1))
+		closeInputErr := input.Close()
+		closeOutputErr := output.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeInputErr != nil {
+			return closeInputErr
+		}
+		if closeOutputErr != nil {
+			return closeOutputErr
+		}
+		if written > maxBackupExtractBytes-extracted || uint64(written) != entry.UncompressedSize64 {
+			return Error{Message: "Backup archive is too large to extract"}
+		}
+		extracted += written
+	}
+	return nil
 }
 
 func safeArchiveName(name string) (string, error) {

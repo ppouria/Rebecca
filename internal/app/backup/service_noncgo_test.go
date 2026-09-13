@@ -2,6 +2,7 @@ package backup
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"context"
 	"os"
@@ -62,6 +63,40 @@ func TestSafeExtractRejectsOversizedEntry(t *testing.T) {
 	err = safeExtract(archivePath, t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("expected extraction size limit error, got %v", err)
+	}
+}
+
+func TestSafeExtractSupportsZipBackups(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "backup.zip")
+	file, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	for name, content := range map[string]string{ManifestName: `{"format":"rebecca"}`, "files/rebecca_env": "PANEL_DOMAIN=example.com\n"} {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	destination := t.TempDir()
+	if err := safeExtract(archivePath, destination); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{ManifestName, "files/rebecca_env"} {
+		if _, err := os.Stat(filepath.Join(destination, filepath.FromSlash(name))); err != nil {
+			t.Fatalf("extracted %s: %v", name, err)
+		}
 	}
 }
 
